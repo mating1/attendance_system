@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # 数据目录
 DATA_DIR = 'data'
@@ -22,6 +22,13 @@ TEACHER_IDS = ['0001', '0002', '0003', '0004']
 
 # 超级管理员账号
 SUPER_ADMIN_ID = '00000'
+
+# 时区设置（北京时间 UTC+8）
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def get_beijing_now():
+    """获取北京时间"""
+    return datetime.now(BEIJING_TZ)
 
 # 星期列表
 WEEKDAYS = ['周一', '周二', '周三', '周四', '周五']
@@ -261,19 +268,6 @@ def has_class(teacher_id, class_name, date_str, period):
     period_schedule = weekday_schedule.get(period, {})
     
     return period_schedule.get('enabled', False)
-    if date is None:
-        date = datetime.now()
-    date_str = date.strftime('%Y-%m-%d')
-    weekday = WEEKDAY_MAP[date.weekday()]
-    if weekday not in WEEKDAYS:
-        return None
-    temp_schedules = load_temp_schedules(teacher_id, class_name)
-    if date_str in temp_schedules and period in temp_schedules[date_str]:
-        return temp_schedules[date_str][period]
-    schedule = load_teacher_schedule(teacher_id, class_name)
-    if weekday in schedule and period in schedule[weekday]:
-        return schedule[weekday][period]
-    return None
 
 
 def get_current_period_and_teacher(teacher_id, class_name, current_time):
