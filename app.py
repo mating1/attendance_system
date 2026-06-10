@@ -1,6 +1,13 @@
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from data_manager import *
+
+# 时区设置（北京时间 UTC+8）
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def get_beijing_now():
+    """获取北京时间"""
+    return datetime.now(BEIJING_TZ)
 
 st.set_page_config(page_title="学生考勤系统", page_icon="📋", layout="wide")
 
@@ -68,7 +75,7 @@ elif st.session_state.user_type == 'student':
             st.session_state.user_type = None
             st.rerun()
 
-    now = datetime.now()
+    now = get_beijing_now()
     weekday = WEEKDAY_MAP[now.weekday()]
     st.write(f"当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')} {weekday}")
 
@@ -170,7 +177,7 @@ elif st.session_state.user_type == 'teacher':
 
             col1, col2, col3 = st.columns(3)
             with col1:
-                selected_date = st.date_input("选择日期", datetime.now())
+                selected_date = st.date_input("选择日期", get_beijing_now())
             with col2:
                 selected_period = st.selectbox("选择节次", PERIODS)
             with col3:
