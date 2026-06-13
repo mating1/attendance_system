@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import sqlite3
 from datetime import datetime, timezone, timedelta
 
 # 数据目录
@@ -11,11 +12,43 @@ TEMP_SCHEDULES_DIR = os.path.join(DATA_DIR, 'temp_schedules')
 ATTENDANCE_DIR = os.path.join(DATA_DIR, 'attendance')
 TEACHER_CLASSES_DIR = os.path.join(DATA_DIR, 'teacher_classes')
 
+# SQLite数据库路径（解决云端数据持久化问题）
+DB_PATH = os.path.join(DATA_DIR, 'attendance.db')
+
 # 初始化目录
 os.makedirs(SCHEDULES_DIR, exist_ok=True)
 os.makedirs(TEMP_SCHEDULES_DIR, exist_ok=True)
 os.makedirs(ATTENDANCE_DIR, exist_ok=True)
 os.makedirs(TEACHER_CLASSES_DIR, exist_ok=True)
+
+# 初始化数据库
+def init_db():
+    """初始化SQLite数据库"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 创建考勤记录表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            student_id TEXT NOT NULL,
+            date_str TEXT NOT NULL,
+            period TEXT NOT NULL,
+            checkin_time TEXT DEFAULT '',
+            status TEXT DEFAULT '缺勤',
+            remark TEXT DEFAULT '',
+            teacher TEXT DEFAULT '',
+            UNIQUE(teacher_id, class_name, student_id, date_str, period)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# 启动时初始化数据库
+init_db()
 
 # 老师账号列表
 TEACHER_IDS = ['0001', '0002', '0003', '0004']
@@ -326,22 +359,30 @@ def load_attendance(teacher_id, class_name, date_str, period):
     filename = f'{teacher_id}_{class_name}_{date_str}_{period}.csv'
     filepath = os.path.join(ATTENDANCE_DIR, filename)
 
+    # 先从数据库加载数据（解决云端数据持久化）
+    db_records = load_attendance_from_db(teacher_id, class_name, date_str, period)
+    db_dict = {r[0]: r for r in db_records}
+
     if os.path.exists(filepath):
         df = pd.read_csv(filepath, index_col=0)
-        # 确保index是字符串类型，与get_students_by_class返回的类型一致
         df.index = df.index.astype(str)
-        # 确保签到时间列是字符串类型
         if '签到时间' in df.columns:
             df['签到时间'] = df['签到时间'].fillna('').astype(str)
-        # 确保备注列是字符串类型
         if '备注' in df.columns:
             df['备注'] = df['备注'].fillna('').astype(str)
-        # 如果没有任课老师列，添加默认值
         if '任课老师' not in df.columns:
             df['任课老师'] = str(teacher_id)
         else:
-            # 确保任课老师列是字符串类型
             df['任课老师'] = df['任课老师'].fillna('').astype(str)
+        
+        # 合并数据库数据
+        for student_id, record in db_dict.items():
+            if student_id in df.index:
+                df.loc[student_id, '签到时间'] = record[1] or ''
+                df.loc[student_id, '状态'] = record[2] or '缺勤'
+                df.loc[student_id, '备注'] = record[3] or ''
+                df.loc[student_id, '任课老师'] = record[4] or str(teacher_id)
+        
         return df, filepath
     else:
         student_ids = get_students_by_class(teacher_id, class_name)
@@ -350,11 +391,51 @@ def load_attendance(teacher_id, class_name, date_str, period):
         df['状态'] = '缺勤'
         df['备注'] = ''
         df['任课老师'] = str(teacher_id)
+        
+        # 从数据库加载数据
+        for student_id, record in db_dict.items():
+            if student_id in df.index:
+                df.loc[student_id, '签到时间'] = record[1] or ''
+                df.loc[student_id, '状态'] = record[2] or '缺勤'
+                df.loc[student_id, '备注'] = record[3] or ''
+                df.loc[student_id, '任课老师'] = record[4] or str(teacher_id)
+        
         return df, filepath
 
 
 def save_attendance(df, filepath):
     df.to_csv(filepath, encoding='utf-8-sig')
+
+
+def save_attendance_to_db(teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher):
+    """保存考勤记录到SQLite数据库（解决云端数据持久化）"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT OR REPLACE INTO attendance
+            (teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher))
+        conn.commit()
+    except Exception as e:
+        print(f"数据库保存失败: {e}")
+    finally:
+        conn.close()
+
+
+def load_attendance_from_db(teacher_id, class_name, date_str, period):
+    """从数据库加载考勤记录"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT student_id, checkin_time, status, remark, teacher
+        FROM attendance
+        WHERE teacher_id = ? AND class_name = ? AND date_str = ? AND period = ?
+    ''', (teacher_id, class_name, date_str, period))
+    records = cursor.fetchall()
+    conn.close()
+    return records
 
 
 def record_attendance(teacher_id, class_name, student_id, period, status, time_str):
@@ -372,13 +453,16 @@ def record_attendance(teacher_id, class_name, student_id, period, status, time_s
     df.loc[student_id, '备注'] = ''
 
     save_attendance(df, filepath)
+    
+    # 同时保存到数据库（解决云端数据持久化）
+    save_attendance_to_db(teacher_id, class_name, student_id, date_str, period, time_str, status, '', str(teacher_id))
+    
     return True, f'签到成功（{status}）'
 
 
 def update_attendance_status(teacher_id, class_name, date_str, period, student_id, new_status, remark='', checkin_time=''):
     df, filepath = load_attendance(teacher_id, class_name, date_str, period)
 
-    # 确保student_id是字符串类型来匹配index
     student_id = str(student_id)
     
     if student_id in df.index:
@@ -388,6 +472,12 @@ def update_attendance_status(teacher_id, class_name, date_str, period, student_i
         if checkin_time:
             df.loc[student_id, '签到时间'] = checkin_time
         save_attendance(df, filepath)
+        
+        # 同时保存到数据库（解决云端数据持久化）
+        checkin = checkin_time if checkin_time else (df.loc[student_id, '签到时间'] if student_id in df.index else '')
+        teacher = df.loc[student_id, '任课老师'] if student_id in df.index and '任课老师' in df.columns else str(teacher_id)
+        save_attendance_to_db(teacher_id, class_name, student_id, date_str, period, checkin, new_status, remark, teacher)
+        
         return True
     return False
 
