@@ -1,33 +1,47 @@
-import pandas as pd
-import numpy as np
-import os
-import json
 import sqlite3
+import pandas as pd
+import os
 from datetime import datetime, timezone, timedelta
 
-# 数据目录
+# 配置
+DB_PATH = 'attendance.db'
 DATA_DIR = 'data'
-SCHEDULES_DIR = os.path.join(DATA_DIR, 'schedules')
-TEMP_SCHEDULES_DIR = os.path.join(DATA_DIR, 'temp_schedules')
-ATTENDANCE_DIR = os.path.join(DATA_DIR, 'attendance')
-TEACHER_CLASSES_DIR = os.path.join(DATA_DIR, 'teacher_classes')
 
-# SQLite数据库路径（解决云端数据持久化问题）
-DB_PATH = os.path.join(DATA_DIR, 'attendance.db')
+# 常量定义
+TEACHER_IDS = ['0001', '0002', '0003', '0004']
+SUPER_ADMIN_ID = '00000'
+WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+WEEKDAY_MAP = {0: '周一', 1: '周二', 2: '周三', 3: '周四', 4: '周五', 5: '周六', 6: '周日'}
 
-# 初始化目录
-os.makedirs(SCHEDULES_DIR, exist_ok=True)
-os.makedirs(TEMP_SCHEDULES_DIR, exist_ok=True)
-os.makedirs(ATTENDANCE_DIR, exist_ok=True)
-os.makedirs(TEACHER_CLASSES_DIR, exist_ok=True)
+PERIODS = [
+    '第1节', '第2节', '第3节', '第4节', '第5节',
+    '第6节', '第7节', '第8节', '第9节', '第10节',
+    '第11节', '第12节', '第13节'
+]
+
+DEFAULT_PERIOD_TIMES = {
+    '第1节': {'start_time': '08:20', 'end_time': '09:00', 'early_start': '08:10', 'late_end': '08:30'},
+    '第2节': {'start_time': '09:10', 'end_time': '09:50', 'early_start': '09:00', 'late_end': '09:20'},
+    '第3节': {'start_time': '10:10', 'end_time': '10:50', 'early_start': '10:00', 'late_end': '10:20'},
+    '第4节': {'start_time': '11:00', 'end_time': '11:40', 'early_start': '10:50', 'late_end': '11:10'},
+    '第5节': {'start_time': '11:50', 'end_time': '12:30', 'early_start': '11:40', 'late_end': '12:00'},
+    '第6节': {'start_time': '14:00', 'end_time': '14:40', 'early_start': '13:50', 'late_end': '14:10'},
+    '第7节': {'start_time': '14:50', 'end_time': '15:30', 'early_start': '14:40', 'late_end': '15:00'},
+    '第8节': {'start_time': '15:50', 'end_time': '16:30', 'early_start': '15:40', 'late_end': '16:00'},
+    '第9节': {'start_time': '16:40', 'end_time': '17:20', 'early_start': '16:30', 'late_end': '16:50'},
+    '第10节': {'start_time': '17:30', 'end_time': '18:10', 'early_start': '17:20', 'late_end': '17:40'},
+    '第11节': {'start_time': '19:00', 'end_time': '19:40', 'early_start': '18:50', 'late_end': '19:10'},
+    '第12节': {'start_time': '19:50', 'end_time': '20:30', 'early_start': '19:40', 'late_end': '20:00'},
+    '第13节': {'start_time': '20:40', 'end_time': '21:20', 'early_start': '20:30', 'late_end': '20:50'}
+}
 
 # 初始化数据库
 def init_db():
-    """初始化SQLite数据库"""
+    os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # 创建考勤记录表
+    # 考勤记录表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,486 +58,371 @@ def init_db():
         )
     ''')
     
+    # 班级表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS classes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            prefix TEXT DEFAULT '',
+            student_count INTEGER DEFAULT 33,
+            UNIQUE(teacher_id, class_name)
+        )
+    ''')
+    
+    # 课表设置表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            weekday TEXT NOT NULL,
+            period TEXT NOT NULL,
+            enabled INTEGER DEFAULT 0,
+            start_time TEXT DEFAULT '08:20',
+            end_time TEXT DEFAULT '09:00',
+            early_start TEXT DEFAULT '08:10',
+            late_end TEXT DEFAULT '08:30',
+            UNIQUE(teacher_id, class_name, weekday, period)
+        )
+    ''')
+    
+    # 学生表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS students (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id TEXT NOT NULL,
+            class_name TEXT NOT NULL,
+            student_id TEXT NOT NULL,
+            UNIQUE(teacher_id, class_name, student_id)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
-# 启动时初始化数据库
-init_db()
+# 初始化默认数据
+def init_default_data():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 检查是否已有默认班级
+    cursor.execute("SELECT COUNT(*) FROM classes")
+    if cursor.fetchone()[0] == 0:
+        # 添加默认班级
+        default_classes = [
+            ('0001', '一班', '1', 33),
+            ('0001', '二班', '2', 33),
+            ('0001', '三班', '3', 33),
+        ]
+        cursor.executemany('INSERT INTO classes (teacher_id, class_name, prefix, student_count) VALUES (?, ?, ?, ?)', 
+                          default_classes)
+        
+        # 添加默认学生
+        students = []
+        for teacher_id, class_name, prefix, count in default_classes:
+            for i in range(1, count + 1):
+                student_id = f"{prefix}{str(i).zfill(2)}"
+                students.append((teacher_id, class_name, student_id))
+        cursor.executemany('INSERT INTO students (teacher_id, class_name, student_id) VALUES (?, ?, ?)', students)
+    
+    conn.commit()
+    conn.close()
 
-# 老师账号列表
-TEACHER_IDS = ['0001', '0002', '0003', '0004']
+# 获取老师的班级列表
+def get_teacher_class_list(teacher_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM classes WHERE teacher_id = ?', (teacher_id,))
+    classes = []
+    for row in cursor.fetchall():
+        classes.append({
+            'id': row[0],
+            'teacher_id': row[1],
+            'name': row[2],
+            'prefix': row[3],
+            'student_count': row[4]
+        })
+    conn.close()
+    return classes
 
-# 超级管理员账号
-SUPER_ADMIN_ID = '00000'
+# 获取班级的学生列表
+def get_students_by_class(teacher_id, class_name):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT student_id FROM students WHERE teacher_id = ? AND class_name = ?', (teacher_id, class_name))
+    students = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return students
 
-# 时区设置（北京时间 UTC+8）
-BEIJING_TZ = timezone(timedelta(hours=8))
+# 根据学生ID获取班级
+def get_class_by_student_id(teacher_id, student_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT class_name FROM students WHERE teacher_id = ? AND student_id = ?', (teacher_id, student_id))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
 
-def get_beijing_now():
-    """获取北京时间"""
-    return datetime.now(BEIJING_TZ)
+# 添加班级
+def add_teacher_class(teacher_id, class_name, prefix='', student_count=33):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO classes (teacher_id, class_name, prefix, student_count) VALUES (?, ?, ?, ?)',
+                      (teacher_id, class_name, prefix, student_count))
+        
+        # 添加学生
+        for i in range(1, student_count + 1):
+            student_id = f"{prefix}{str(i).zfill(2)}" if prefix else f"{str(i).zfill(3)}"
+            cursor.execute('INSERT INTO students (teacher_id, class_name, student_id) VALUES (?, ?, ?)',
+                          (teacher_id, class_name, student_id))
+        
+        conn.commit()
+        conn.close()
+        return True, f"班级 {class_name} 添加成功"
+    except Exception as e:
+        return False, str(e)
 
-# 星期列表
-WEEKDAYS = ['周一', '周二', '周三', '周四', '周五']
-WEEKDAY_MAP = {
-    0: '周一',
-    1: '周二',
-    2: '周三',
-    3: '周四',
-    4: '周五',
-    5: '周六',
-    6: '周日'
-}
+# 删除班级
+def remove_teacher_class(teacher_id, class_name):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM students WHERE teacher_id = ? AND class_name = ?', (teacher_id, class_name))
+        cursor.execute('DELETE FROM classes WHERE teacher_id = ? AND class_name = ?', (teacher_id, class_name))
+        conn.commit()
+        conn.close()
+        return True, f"班级 {class_name} 删除成功"
+    except Exception as e:
+        return False, str(e)
 
-# 节次列表
-PERIODS = [f'第{i}节' for i in range(1, 14)]
+# 添加学生到班级
+def add_student_to_class(teacher_id, class_name, student_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('INSERT INTO students (teacher_id, class_name, student_id) VALUES (?, ?, ?)',
+                      (teacher_id, class_name, student_id))
+        conn.commit()
+        conn.close()
+        return True, f"学生 {student_id} 添加成功"
+    except Exception as e:
+        return False, str(e)
 
-# 默认每节课的时间
-DEFAULT_PERIOD_TIMES = {
-    '第1节': {'start_time': '08:20', 'end_time': '09:00', 'early_start': '08:10', 'late_end': '08:30',
-              'enabled': False},
-    '第2节': {'start_time': '09:10', 'end_time': '09:50', 'early_start': '09:00', 'late_end': '09:20',
-              'enabled': False},
-    '第3节': {'start_time': '10:00', 'end_time': '10:40', 'early_start': '09:50', 'late_end': '10:10',
-              'enabled': False},
-    '第4节': {'start_time': '10:50', 'end_time': '11:30', 'early_start': '10:40', 'late_end': '11:00',
-              'enabled': False},
-    '第5节': {'start_time': '11:40', 'end_time': '12:20', 'early_start': '11:30', 'late_end': '11:50',
-              'enabled': False},
-    '第6节': {'start_time': '14:00', 'end_time': '14:40', 'early_start': '13:50', 'late_end': '14:10',
-              'enabled': False},
-    '第7节': {'start_time': '14:50', 'end_time': '15:30', 'early_start': '14:40', 'late_end': '15:00',
-              'enabled': False},
-    '第8节': {'start_time': '15:40', 'end_time': '16:20', 'early_start': '15:30', 'late_end': '15:50',
-              'enabled': False},
-    '第9节': {'start_time': '16:30', 'end_time': '17:10', 'early_start': '16:20', 'late_end': '16:40',
-              'enabled': False},
-    '第10节': {'start_time': '17:20', 'end_time': '18:00', 'early_start': '17:10', 'late_end': '17:30',
-               'enabled': False},
-    '第11节': {'start_time': '19:00', 'end_time': '19:40', 'early_start': '18:50', 'late_end': '19:10',
-               'enabled': False},
-    '第12节': {'start_time': '19:50', 'end_time': '20:30', 'early_start': '19:40', 'late_end': '20:00',
-               'enabled': False},
-    '第13节': {'start_time': '20:40', 'end_time': '21:20', 'early_start': '20:30', 'late_end': '20:50',
-               'enabled': False}
-}
+# 更新班级人数
+def update_class_student_count(teacher_id, class_name, new_count):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # 获取当前人数
+        cursor.execute('SELECT student_count, prefix FROM classes WHERE teacher_id = ? AND class_name = ?', 
+                      (teacher_id, class_name))
+        result = cursor.fetchone()
+        if not result:
+            return False, "班级不存在"
+        
+        current_count, prefix = result
+        
+        if new_count > current_count:
+            # 添加新学生
+            for i in range(current_count + 1, new_count + 1):
+                student_id = f"{prefix}{str(i).zfill(2)}" if prefix else f"{str(i).zfill(3)}"
+                cursor.execute('INSERT INTO students (teacher_id, class_name, student_id) VALUES (?, ?, ?)',
+                              (teacher_id, class_name, student_id))
+        elif new_count < current_count:
+            # 删除多余学生
+            students = get_students_by_class(teacher_id, class_name)
+            students_to_delete = students[new_count:]
+            for student_id in students_to_delete:
+                cursor.execute('DELETE FROM students WHERE teacher_id = ? AND class_name = ? AND student_id = ?',
+                              (teacher_id, class_name, student_id))
+        
+        cursor.execute('UPDATE classes SET student_count = ? WHERE teacher_id = ? AND class_name = ?',
+                      (new_count, teacher_id, class_name))
+        
+        conn.commit()
+        conn.close()
+        return True, f"班级 {class_name} 人数已更新为 {new_count}"
+    except Exception as e:
+        return False, str(e)
 
-
-def get_default_schedule():
+# 加载课表
+def load_teacher_schedule(teacher_id, class_name):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT weekday, period, enabled, start_time, end_time, early_start, late_end '
+                  'FROM schedules WHERE teacher_id = ? AND class_name = ?', (teacher_id, class_name))
+    
     schedule = {}
-    for weekday in WEEKDAYS:
-        schedule[weekday] = {}
-        for period, times in DEFAULT_PERIOD_TIMES.items():
-            schedule[weekday][period] = times.copy()
+    for row in cursor.fetchall():
+        weekday, period, enabled, start_time, end_time, early_start, late_end = row
+        if weekday not in schedule:
+            schedule[weekday] = {}
+        schedule[weekday][period] = {
+            'enabled': bool(enabled),
+            'start_time': start_time,
+            'end_time': end_time,
+            'early_start': early_start,
+            'late_end': late_end
+        }
+    conn.close()
     return schedule
 
-
-def get_teacher_classes_file(teacher_id):
-    return os.path.join(TEACHER_CLASSES_DIR, f'{teacher_id}.json')
-
-
-def load_teacher_classes(teacher_id):
-    filepath = get_teacher_classes_file(teacher_id)
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    else:
-        default_classes = {
-            '一班': {'prefix': '1', 'student_count': 33},
-            '二班': {'prefix': '2', 'student_count': 33},
-            '三班': {'prefix': '3', 'student_count': 33}
-        }
-        save_teacher_classes(teacher_id, default_classes)
-        return default_classes
-
-
-def save_teacher_classes(teacher_id, classes):
-    filepath = get_teacher_classes_file(teacher_id)
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(classes, f, ensure_ascii=False, indent=2)
-
-
-def get_next_class_number(teacher_id):
-    classes = load_teacher_classes(teacher_id)
-    max_num = 0
-    for class_name in classes.keys():
-        for i in range(1, 100):
-            if class_name == f'{i}班':
-                if i > max_num:
-                    max_num = i
-    if max_num == 0:
-        return len(classes) + 1
-    return max_num + 1
-
-
-def add_teacher_class(teacher_id, class_name, prefix, student_count):
-    classes = load_teacher_classes(teacher_id)
-    if class_name in classes:
-        return False, "班级已存在"
-    classes[class_name] = {
-        'prefix': prefix,
-        'student_count': student_count
-    }
-    save_teacher_classes(teacher_id, classes)
-    schedule = get_default_schedule()
-    save_teacher_schedule(teacher_id, class_name, schedule)
-    return True, "添加成功"
-
-
-def remove_teacher_class(teacher_id, class_name):
-    if class_name in ['一班', '二班', '三班']:
-        return False, "不能删除默认班级"
-    classes = load_teacher_classes(teacher_id)
-    if class_name not in classes:
-        return False, "班级不存在"
-    del classes[class_name]
-    save_teacher_classes(teacher_id, classes)
-    prefix = f'{teacher_id}_{class_name}'
-    for file in os.listdir(ATTENDANCE_DIR):
-        if file.startswith(prefix):
-            os.remove(os.path.join(ATTENDANCE_DIR, file))
-    return True, "删除成功"
-
-
-def update_class_student_count(teacher_id, class_name, student_count):
-    classes = load_teacher_classes(teacher_id)
-    if class_name not in classes:
-        return False, "班级不存在"
-    classes[class_name]['student_count'] = student_count
-    save_teacher_classes(teacher_id, classes)
-    return True, "修改成功"
-
-
-def get_teacher_class_list(teacher_id):
-    classes = load_teacher_classes(teacher_id)
-    result = []
-    for class_name, info in classes.items():
-        result.append({
-            'name': class_name,
-            'prefix': info['prefix'],
-            'student_count': info['student_count']
-        })
-    return result
-
-
-def get_students_by_class(teacher_id, class_name):
-    classes = load_teacher_classes(teacher_id)
-    if class_name not in classes:
-        return []
-    prefix = classes[class_name]['prefix']
-    count = classes[class_name]['student_count']
-    return [f'{prefix}{i:02d}' for i in range(1, count + 1)]
-
-
-def get_class_by_student_id(teacher_id, student_id):
-    classes = load_teacher_classes(teacher_id)
-    for class_name, info in classes.items():
-        prefix = info['prefix']
-        if student_id.startswith(prefix):
-            return class_name
-    return None
-
-
-def get_schedule_key(teacher_id, class_name):
-    return f'{teacher_id}_{class_name}'
-
-
-def load_teacher_schedule(teacher_id, class_name):
-    key = get_schedule_key(teacher_id, class_name)
-    schedule_file = os.path.join(SCHEDULES_DIR, f'{key}.json')
-    if os.path.exists(schedule_file):
-        with open(schedule_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    else:
-        return get_default_schedule()
-
-
+# 保存课表
 def save_teacher_schedule(teacher_id, class_name, schedule):
-    key = get_schedule_key(teacher_id, class_name)
-    schedule_file = os.path.join(SCHEDULES_DIR, f'{key}.json')
-    with open(schedule_file, 'w', encoding='utf-8') as f:
-        json.dump(schedule, f, ensure_ascii=False, indent=2)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    for weekday, periods in schedule.items():
+        for period, data in periods.items():
+            cursor.execute('''
+                INSERT OR REPLACE INTO schedules 
+                (teacher_id, class_name, weekday, period, enabled, start_time, end_time, early_start, late_end)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (teacher_id, class_name, weekday, period, int(data['enabled']),
+                  data['start_time'], data['end_time'], data['early_start'], data['late_end']))
+    
+    conn.commit()
+    conn.close()
 
-
-def load_temp_schedules(teacher_id, class_name):
-    key = get_schedule_key(teacher_id, class_name)
-    temp_file = os.path.join(TEMP_SCHEDULES_DIR, f'{key}.json')
-    if os.path.exists(temp_file):
-        with open(temp_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    else:
-        return {}
-
-
-def save_temp_schedules(teacher_id, class_name, temp_schedules):
-    key = get_schedule_key(teacher_id, class_name)
-    temp_file = os.path.join(TEMP_SCHEDULES_DIR, f'{key}.json')
-    with open(temp_file, 'w', encoding='utf-8') as f:
-        json.dump(temp_schedules, f, ensure_ascii=False, indent=2)
-
-
-def add_temp_schedule(teacher_id, class_name, date_str, period, schedule):
-    temp_schedules = load_temp_schedules(teacher_id, class_name)
-    if date_str not in temp_schedules:
-        temp_schedules[date_str] = {}
-    temp_schedules[date_str][period] = schedule
-    save_temp_schedules(teacher_id, class_name, temp_schedules)
-
-
-def remove_temp_schedule(teacher_id, class_name, date_str, period):
-    temp_schedules = load_temp_schedules(teacher_id, class_name)
-    if date_str in temp_schedules and period in temp_schedules[date_str]:
-        del temp_schedules[date_str][period]
-        if len(temp_schedules[date_str]) == 0:
-            del temp_schedules[date_str]
-        save_temp_schedules(teacher_id, class_name, temp_schedules)
-        return True
-    return False
-
-
+# 检查是否有课
 def has_class(teacher_id, class_name, date_str, period):
-    """检查某个班级在某个日期和节次是否有课"""
-    date = datetime.strptime(date_str, '%Y-%m-%d')
+    date = datetime.strptime(date_str, '%Y-%m-%d').date()
     weekday = WEEKDAY_MAP[date.weekday()]
     
-    if weekday not in WEEKDAYS:
-        return False
-    
-    # 先检查临时课表
-    temp_schedules = load_temp_schedules(teacher_id, class_name)
-    if date_str in temp_schedules and period in temp_schedules[date_str]:
-        if temp_schedules[date_str][period].get('enabled', False):
-            return True
-    
-    # 检查常规课表
     schedule = load_teacher_schedule(teacher_id, class_name)
-    weekday_schedule = schedule.get(weekday, {})
-    period_schedule = weekday_schedule.get(period, {})
+    return weekday in schedule and period in schedule[weekday] and schedule[weekday][period].get('enabled', False)
+
+# 获取当前时间段和老师
+def get_current_period_and_teacher(teacher_id, class_name, now):
+    weekday = WEEKDAY_MAP[now.weekday()]
+    schedule = load_teacher_schedule(teacher_id, class_name)
     
-    return period_schedule.get('enabled', False)
-
-
-def get_current_period_and_teacher(teacher_id, class_name, current_time):
-    current_str = current_time.strftime('%H:%M')
-    weekday = WEEKDAY_MAP[current_time.weekday()]
-    date_str = current_time.strftime('%Y-%m-%d')
-
-    if weekday not in WEEKDAYS:
+    if weekday not in schedule:
         return None, None
-
-    temp_schedules = load_temp_schedules(teacher_id, class_name)
-    if date_str in temp_schedules:
-        for period, schedule in temp_schedules[date_str].items():
-            if schedule.get('enabled', False):
-                end_time = schedule.get('end_time')
-                early_start = schedule.get('early_start')
-                if early_start and end_time and early_start <= current_str <= end_time:
-                    return period, schedule
-
-    schedule = load_teacher_schedule(teacher_id, class_name)
-    weekday_schedule = schedule.get(weekday, {})
-    for period, period_schedule in weekday_schedule.items():
-        if period_schedule.get('enabled', False):
-            end_time = period_schedule.get('end_time')
-            early_start = period_schedule.get('early_start')
-            if early_start and end_time and early_start <= current_str <= end_time:
-                return period, period_schedule
-
+    
+    current_time = now.strftime('%H:%M')
+    
+    for period, period_data in schedule[weekday].items():
+        if period_data.get('enabled', False):
+            start_time = period_data['start_time']
+            end_time = period_data['end_time']
+            
+            if start_time <= current_time <= end_time:
+                return period, {
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'early_start': period_data['early_start'],
+                    'late_end': period_data['late_end']
+                }
+    
     return None, None
 
-
-def check_attendance_status(schedule, current_time):
-    if schedule is None or not schedule.get('enabled', False):
-        return 'no_class'
-
-    early_start = schedule.get('early_start')
-    start_time = schedule.get('start_time')
-    late_end = schedule.get('late_end')
-
-    if not early_start or not start_time or not late_end:
-        return 'no_class'
-
-    current_str = current_time.strftime('%H:%M')
-
-    if current_str < early_start:
+# 检查考勤状态
+def check_attendance_status(schedule, now):
+    current_time = now.strftime('%H:%M')
+    
+    if current_time < schedule['early_start']:
         return 'early'
-    elif current_str <= start_time:
+    elif current_time <= schedule['late_end']:
         return 'present'
-    elif current_str <= late_end:
+    elif current_time <= schedule['end_time']:
         return 'late'
     else:
         return 'absent'
 
-
-def load_attendance(teacher_id, class_name, date_str, period):
-    filename = f'{teacher_id}_{class_name}_{date_str}_{period}.csv'
-    filepath = os.path.join(ATTENDANCE_DIR, filename)
-
-    # 先从数据库加载数据
-    db_records = load_attendance_from_db(teacher_id, class_name, date_str, period)
-    db_dict = {r[0]: r for r in db_records}
-
-    if os.path.exists(filepath):
-        df = pd.read_csv(filepath, index_col=0)
-        df.index = df.index.astype(str)
-        # 确保所有列都存在且类型正确
-        for col in ['签到时间', '状态', '备注', '任课老师']:
-            if col not in df.columns:
-                df[col] = '' if col != '状态' else '缺勤'
-        df['签到时间'] = df['签到时间'].fillna('').astype(str)
-        df['备注'] = df['备注'].fillna('').astype(str)
-        # 确保所有学生的任课老师都设置为当前老师
-        df['任课老师'] = str(teacher_id)
-        
-        # 合并数据库数据（只更新签到时间、状态、备注，任课老师保持一致）
-        for student_id, record in db_dict.items():
-            if student_id in df.index:
-                df.loc[student_id, '签到时间'] = record[1] or ''
-                df.loc[student_id, '状态'] = record[2] or '缺勤'
-                df.loc[student_id, '备注'] = record[3] or ''
-        
-        return df, filepath
-    else:
-        student_ids = get_students_by_class(teacher_id, class_name)
-        df = pd.DataFrame(index=student_ids, columns=['签到时间', '状态', '备注', '任课老师'])
-        df['签到时间'] = ''
-        df['状态'] = '缺勤'
-        df['备注'] = ''
-        # 确保所有学生的任课老师都设置为当前老师
-        df['任课老师'] = str(teacher_id)
-        
-        # 从数据库加载数据（只更新签到时间、状态、备注，任课老师保持一致）
-        for student_id, record in db_dict.items():
-            if student_id in df.index:
-                df.loc[student_id, '签到时间'] = record[1] or ''
-                df.loc[student_id, '状态'] = record[2] or '缺勤'
-                df.loc[student_id, '备注'] = record[3] or ''
-        
-        return df, filepath
-
-
-def save_attendance(df, filepath):
-    df.to_csv(filepath, encoding='utf-8-sig')
-
-
-def save_attendance_to_db(teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher):
-    """保存考勤记录到SQLite数据库（解决云端数据持久化）"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+# 记录考勤
+def record_attendance(teacher_id, class_name, student_id, period, status, checkin_time):
     try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
         cursor.execute('''
             INSERT OR REPLACE INTO attendance
-            (teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher))
+            (teacher_id, class_name, student_id, date_str, period, checkin_time, status, teacher)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (teacher_id, class_name, student_id, 
+              datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d'),
+              period, checkin_time, status, teacher_id))
+        
         conn.commit()
-    except Exception as e:
-        print(f"数据库保存失败: {e}")
-    finally:
         conn.close()
+        return True, f"✅ 已签到 ({status})"
+    except Exception as e:
+        return False, str(e)
 
-
-def load_attendance_from_db(teacher_id, class_name, date_str, period):
-    """从数据库加载考勤记录"""
+# 加载考勤数据
+def load_attendance(teacher_id, class_name, date_str, period):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
     cursor.execute('''
         SELECT student_id, checkin_time, status, remark, teacher
         FROM attendance
         WHERE teacher_id = ? AND class_name = ? AND date_str = ? AND period = ?
     ''', (teacher_id, class_name, date_str, period))
-    records = cursor.fetchall()
+    
+    data = []
+    for row in cursor.fetchall():
+        data.append({
+            '学号': row[0],
+            '签到时间': row[1],
+            '状态': row[2],
+            '备注': row[3],
+            '任课老师': row[4]
+        })
+    
     conn.close()
-    return records
-
-
-def record_attendance(teacher_id, class_name, student_id, period, status, time_str):
-    """记录考勤"""
-    date_str = datetime.now().strftime('%Y-%m-%d')
-    df, filepath = load_attendance(teacher_id, class_name, date_str, period)
-
-    student_id = str(student_id)
-
-    # 检查学生是否在班级中
-    if student_id not in df.index:
-        return False, f'学号 {student_id} 不在该班级中'
-
-    # 如果已经签到过，不重复记录
-    if df.loc[student_id, '签到时间'] != '':
-        return False, '这节课你已经签过了'
-
-    # 无论状态是出勤、迟到还是缺勤，都记录时间
-    df.loc[student_id, '签到时间'] = time_str
-    df.loc[student_id, '状态'] = status
-    df.loc[student_id, '备注'] = ''
-
-    save_attendance(df, filepath)
     
-    # 同时保存到数据库
-    save_attendance_to_db(teacher_id, class_name, student_id, date_str, period, time_str, status, '', str(teacher_id))
+    if data:
+        df = pd.DataFrame(data).set_index('学号')
+    else:
+        df = pd.DataFrame(columns=['学号', '签到时间', '状态', '备注', '任课老师']).set_index('学号')
     
-    return True, f'签到成功（{status}）'
+    return df, f"{DATA_DIR}/{teacher_id}_{class_name}_{date_str}_{period}.csv"
 
-
-def update_attendance_status(teacher_id, class_name, date_str, period, student_id, new_status, remark='', checkin_time=''):
-    df, filepath = load_attendance(teacher_id, class_name, date_str, period)
-
-    student_id = str(student_id)
-    
-    if student_id in df.index:
-        df.loc[student_id, '状态'] = new_status
-        if remark:
-            df.loc[student_id, '备注'] = remark
-        if checkin_time:
-            df.loc[student_id, '签到时间'] = checkin_time
-        save_attendance(df, filepath)
+# 更新考勤状态
+def update_attendance_status(teacher_id, class_name, date_str, period, student_id, status, remark='', checkin_time=''):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        # 同时保存到数据库（解决云端数据持久化）
-        checkin = checkin_time if checkin_time else (df.loc[student_id, '签到时间'] if student_id in df.index else '')
-        teacher = df.loc[student_id, '任课老师'] if student_id in df.index and '任课老师' in df.columns else str(teacher_id)
-        save_attendance_to_db(teacher_id, class_name, student_id, date_str, period, checkin, new_status, remark, teacher)
+        cursor.execute('''
+            INSERT OR REPLACE INTO attendance
+            (teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (teacher_id, class_name, student_id, date_str, period, checkin_time, status, remark, teacher_id))
         
+        conn.commit()
+        conn.close()
         return True
-    return False
+    except Exception as e:
+        return False
 
-
-def get_attendance_summary(teacher_id, class_name, date_str, period):
-    df, _ = load_attendance(teacher_id, class_name, date_str, period)
-
-    present_count = len(df[df['状态'] == '出勤'])
-    late_count = len(df[df['状态'] == '迟到'])
-    absent_count = len(df[df['状态'] == '缺勤'])
-
-    return {
-        'total': len(df),
-        'present': present_count,
-        'late': late_count,
-        'absent': absent_count
-    }
-
-
+# 导出CSV
 def export_to_csv(teacher_id, class_name, date_str, period):
     df, filepath = load_attendance(teacher_id, class_name, date_str, period)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    filepath = f"{DATA_DIR}/{teacher_id}_{class_name}_{date_str}_{period}.csv"
+    df.to_csv(filepath, encoding='utf-8-sig')
+    return filepath
 
-    export_df = df.reset_index()
-    export_df = export_df.rename(columns={'index': '学号'})
+# 获取下一个班级编号
+def get_next_class_number(teacher_id):
+    classes = get_teacher_class_list(teacher_id)
+    numbers = []
+    for cls in classes:
+        name = cls['name']
+        if name.endswith('班'):
+            try:
+                num = int(name[:-1])
+                numbers.append(num)
+            except:
+                pass
+    return max(numbers) + 1 if numbers else 1
 
-    export_filename = f'attendance_{teacher_id}_{class_name}_{date_str}_{period}.csv'
-    export_path = os.path.join(ATTENDANCE_DIR, export_filename)
-    export_df.to_csv(export_path, index=False, encoding='utf-8-sig')
-
-    return export_path
-
-
-def get_all_temp_schedules(teacher_id, class_name):
-    temp_schedules = load_temp_schedules(teacher_id, class_name)
-    result = []
-    for date_str, periods in temp_schedules.items():
-        for period, schedule in periods.items():
-            result.append({
-                'date': date_str,
-                'period': period,
-                'schedule': schedule
-            })
-    result.sort(key=lambda x: x['date'])
-    return result
+# 初始化
+init_db()
+init_default_data()
