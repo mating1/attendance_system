@@ -359,29 +359,28 @@ def load_attendance(teacher_id, class_name, date_str, period):
     filename = f'{teacher_id}_{class_name}_{date_str}_{period}.csv'
     filepath = os.path.join(ATTENDANCE_DIR, filename)
 
-    # 先从数据库加载数据（解决云端数据持久化）
+    # 先从数据库加载数据
     db_records = load_attendance_from_db(teacher_id, class_name, date_str, period)
     db_dict = {r[0]: r for r in db_records}
 
     if os.path.exists(filepath):
         df = pd.read_csv(filepath, index_col=0)
         df.index = df.index.astype(str)
-        if '签到时间' in df.columns:
-            df['签到时间'] = df['签到时间'].fillna('').astype(str)
-        if '备注' in df.columns:
-            df['备注'] = df['备注'].fillna('').astype(str)
-        if '任课老师' not in df.columns:
-            df['任课老师'] = str(teacher_id)
-        else:
-            df['任课老师'] = df['任课老师'].fillna('').astype(str)
+        # 确保所有列都存在且类型正确
+        for col in ['签到时间', '状态', '备注', '任课老师']:
+            if col not in df.columns:
+                df[col] = '' if col != '状态' else '缺勤'
+        df['签到时间'] = df['签到时间'].fillna('').astype(str)
+        df['备注'] = df['备注'].fillna('').astype(str)
+        # 确保所有学生的任课老师都设置为当前老师
+        df['任课老师'] = str(teacher_id)
         
-        # 合并数据库数据
+        # 合并数据库数据（只更新签到时间、状态、备注，任课老师保持一致）
         for student_id, record in db_dict.items():
             if student_id in df.index:
                 df.loc[student_id, '签到时间'] = record[1] or ''
                 df.loc[student_id, '状态'] = record[2] or '缺勤'
                 df.loc[student_id, '备注'] = record[3] or ''
-                df.loc[student_id, '任课老师'] = record[4] or str(teacher_id)
         
         return df, filepath
     else:
@@ -390,15 +389,15 @@ def load_attendance(teacher_id, class_name, date_str, period):
         df['签到时间'] = ''
         df['状态'] = '缺勤'
         df['备注'] = ''
+        # 确保所有学生的任课老师都设置为当前老师
         df['任课老师'] = str(teacher_id)
         
-        # 从数据库加载数据
+        # 从数据库加载数据（只更新签到时间、状态、备注，任课老师保持一致）
         for student_id, record in db_dict.items():
             if student_id in df.index:
                 df.loc[student_id, '签到时间'] = record[1] or ''
                 df.loc[student_id, '状态'] = record[2] or '缺勤'
                 df.loc[student_id, '备注'] = record[3] or ''
-                df.loc[student_id, '任课老师'] = record[4] or str(teacher_id)
         
         return df, filepath
 
@@ -439,22 +438,28 @@ def load_attendance_from_db(teacher_id, class_name, date_str, period):
 
 
 def record_attendance(teacher_id, class_name, student_id, period, status, time_str):
+    """记录考勤"""
     date_str = datetime.now().strftime('%Y-%m-%d')
     df, filepath = load_attendance(teacher_id, class_name, date_str, period)
 
-    # 确保student_id是字符串类型来匹配index
     student_id = str(student_id)
 
-    if student_id in df.index and df.loc[student_id, '状态'] != '缺勤' and df.loc[student_id, '签到时间'] != '':
+    # 检查学生是否在班级中
+    if student_id not in df.index:
+        return False, f'学号 {student_id} 不在该班级中'
+
+    # 如果已经签到过，不重复记录
+    if df.loc[student_id, '签到时间'] != '':
         return False, '这节课你已经签过了'
 
+    # 无论状态是出勤、迟到还是缺勤，都记录时间
     df.loc[student_id, '签到时间'] = time_str
     df.loc[student_id, '状态'] = status
     df.loc[student_id, '备注'] = ''
 
     save_attendance(df, filepath)
     
-    # 同时保存到数据库（解决云端数据持久化）
+    # 同时保存到数据库
     save_attendance_to_db(teacher_id, class_name, student_id, date_str, period, time_str, status, '', str(teacher_id))
     
     return True, f'签到成功（{status}）'
