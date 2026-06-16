@@ -94,22 +94,7 @@ elif st.session_state.user_type == 'student':
 
             status = check_attendance_status(schedule, now)
 
-            # 检查是否已经签到
-            date_str = now.strftime('%Y-%m-%d')
-            attendance_df, _ = load_attendance(st.session_state.teacher_id, student_class, date_str, period)
-            has_checkin = False
-            checkin_status = ''
-            checkin_time = ''
-            if str(st.session_state.user_id) in attendance_df.index:
-                checkin_time = attendance_df.loc[str(st.session_state.user_id), '签到时间']
-                checkin_status = attendance_df.loc[str(st.session_state.user_id), '状态']
-                has_checkin = checkin_time != ''
-
-            # 如果已经签到，显示签到状态
-            if has_checkin:
-                st.success(f"✅ 已签到 ({checkin_status})")
-                st.write(f"签到时间：{checkin_time}")
-            elif status == 'early':
+            if status == 'early':
                 st.error(f"签到时间未到，请在 {schedule['early_start']} 后签到")
             elif status == 'absent':
                 st.error("签到时间已过，已记为缺勤，请联系老师补录")
@@ -172,6 +157,7 @@ elif st.session_state.user_type == 'teacher':
         if st.session_state.page == 'attendance':
             # 超级管理员可以看到所有班级
             if st.session_state.user_id == SUPER_ADMIN_ID:
+                # 获取所有老师的班级
                 all_classes = []
                 for tid in TEACHER_IDS:
                     classes = get_teacher_class_list(tid)
@@ -183,6 +169,7 @@ elif st.session_state.user_type == 'teacher':
                 class_list = get_teacher_class_list(st.session_state.teacher_id)
                 class_names = [c['name'] for c in class_list]
 
+            # 如果当前选中的班级不在可选列表中，重置
             if st.session_state.selected_class not in class_names:
                 st.session_state.selected_class = class_names[0] if class_names else None
 
@@ -192,14 +179,15 @@ elif st.session_state.user_type == 'teacher':
             with col1:
                 selected_date = st.date_input("选择日期", get_beijing_now())
             with col2:
-                selected_period = st.selectbox("选择节次", PERIODS, key="attendance_period_select")
+                selected_period = st.selectbox("选择节次", PERIODS)
             with col3:
-                st.write("")
+                st.write("")  # 占位
                 query_clicked = st.button("查询", use_container_width=True)
 
             date_str = selected_date.strftime('%Y-%m-%d')
             period = selected_period
 
+            # 获取当前班级对应的老师（超级管理员需要知道是哪个老师的课）
             current_teacher_id = st.session_state.teacher_id
             if st.session_state.user_id == SUPER_ADMIN_ID:
                 for cls in all_classes:
@@ -207,6 +195,7 @@ elif st.session_state.user_type == 'teacher':
                         current_teacher_id = cls['teacher_id']
                         break
 
+            # 存储查询条件和编辑数据到session_state
             if 'query_date' not in st.session_state:
                 st.session_state.query_date = None
             if 'query_period' not in st.session_state:
@@ -214,22 +203,30 @@ elif st.session_state.user_type == 'teacher':
             if 'query_clicked' not in st.session_state:
                 st.session_state.query_clicked = False
 
+            # 点击查询按钮后更新session_state
             if query_clicked:
-                if not has_class(current_teacher_id, st.session_state.selected_class, date_str, period):
+                # 检查是否有课
+                if not has_class(current_teacher_id, selected_class, date_str, period):
                     st.error(f"该班级在 {date_str} {period} 没有课程安排！")
                 else:
                     st.session_state.query_date = date_str
                     st.session_state.query_period = period
                     st.session_state.query_clicked = True
+                    # 清除编辑器缓存，确保重新加载
                     for key in list(st.session_state.keys()):
                         if key.startswith('editor_data_'):
                             del st.session_state[key]
 
+            # 只有查询过才显示编辑器
             if st.session_state.query_clicked and st.session_state.query_date == date_str and st.session_state.query_period == period:
+                # 获取该班级所有学生
                 students = get_students_by_class(current_teacher_id, st.session_state.selected_class)
 
-                df, filepath = load_attendance(current_teacher_id, st.session_state.selected_class, date_str, period)
+                # 加载当前考勤数据
+                df, filepath = load_attendance(current_teacher_id, st.session_state.selected_class, date_str,
+                                               period)
 
+                # 构建可编辑的数据表
                 edit_data = []
                 for student_id in students:
                     row = {
@@ -241,122 +238,224 @@ elif st.session_state.user_type == 'teacher':
                     }
                     edit_data.append(row)
 
+                # 使用唯一的key确保每次都是新数据
                 editor_key = f"editor_data_{date_str}_{period}"
 
+                # 使用 data_editor
                 edited_df = st.data_editor(
                     edit_data,
                     column_config={
                         "学号": st.column_config.TextColumn("学号", disabled=True),
                         "签到时间": st.column_config.TextColumn("签到时间"),
-                        "状态": st.column_config.SelectboxColumn("状态", options=['出勤', '迟到', '缺勤'], required=True),
-                        "任课老师": st.column_config.TextColumn("任课老师", disabled=True),
-                        "备注": st.column_config.TextColumn("备注")
+                        "状态": st.column_config.SelectboxColumn("状态", options=['出勤', '迟到', '缺勤']),
+                        "任课老师": st.column_config.TextColumn("任课老师"),
+                        "备注": st.column_config.TextColumn("备注"),
                     },
-                    key=editor_key,
-                    use_container_width=True
+                    hide_index=True,
+                    use_container_width=True,
+                    key=editor_key
                 )
 
+                # 从编辑器数据计算汇总
+                present_count = sum(1 for row in edited_df if row['状态'] == '出勤')
+                late_count = sum(1 for row in edited_df if row['状态'] == '迟到')
+                absent_count = sum(1 for row in edited_df if row['状态'] == '缺勤')
+                total_count = len(edited_df)
+
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("出勤", present_count)
+                with col2:
+                    st.metric("迟到", late_count)
+                with col3:
+                    st.metric("缺勤", absent_count)
+                with col4:
+                    st.metric("总计", total_count)
+
+                st.write("---")
+
+                # 保存按钮
                 if st.button("保存修改", use_container_width=True, type="primary"):
                     for row in edited_df:
                         student_id = row["学号"]
-                        new_status = row["状态"]
-                        remark = row["备注"]
-                        checkin_time = row["签到时间"]
-                        update_attendance_status(current_teacher_id, st.session_state.selected_class, date_str, period, student_id, new_status, remark, checkin_time)
-                    st.success("修改已保存！")
-                    for key in list(st.session_state.keys()):
-                        if key.startswith('editor_data_'):
-                            del st.session_state[key]
+                        new_status = str(row["状态"])
+                        remark = str(row.get("备注", ""))
+                        checkin_time = str(row.get("签到时间", ""))
+                        update_attendance_status(
+                            current_teacher_id, 
+                            st.session_state.selected_class, 
+                            date_str,
+                            period, 
+                            student_id, 
+                            new_status, 
+                            remark,
+                            checkin_time
+                        )
+                    st.success("保存成功！")
                     st.rerun()
+
+                # 导出按钮
+                if st.button("导出CSV", use_container_width=True):
+                    filepath = export_to_csv(current_teacher_id, st.session_state.selected_class, date_str, period)
+                    with open(filepath, 'rb') as f:
+                        st.download_button("下载CSV", f,
+                                           file_name=f"考勤_{st.session_state.selected_class}_{date_str}_{period}.csv")
 
         # ========== 课表设置页面 ==========
         elif st.session_state.page == 'schedule':
-            st.markdown("### 课表设置")
-            
-            selected_weekday = st.selectbox("选择星期", WEEKDAYS, key="schedule_weekday_select")
-            
-            st.write(f"#### {selected_weekday} 的课程安排")
-            
-            # 使用正确的函数名
-            schedule_data = load_teacher_schedule(st.session_state.teacher_id, st.session_state.selected_class)
-            
-            for idx, period in enumerate(PERIODS[:10]):
-                period_data = schedule_data.get(selected_weekday, {}).get(period, {})
-                
-                col1, col2, col3, col4, col5, col6 = st.columns(6)
-                with col1:
-                    st.write(f"**{period}**")
-                with col2:
-                    enabled = st.checkbox("启用", value=period_data.get('enabled', False), key=f"enable_{selected_weekday}_{period}_{idx}")
-                with col3:
-                    start_time = st.time_input("开始时间", value=datetime.strptime(period_data.get('start_time', '08:20'), '%H:%M').time(), key=f"start_{selected_weekday}_{period}_{idx}")
-                with col4:
-                    end_time = st.time_input("结束时间", value=datetime.strptime(period_data.get('end_time', '09:00'), '%H:%M').time(), key=f"end_{selected_weekday}_{period}_{idx}")
-                with col5:
-                    early_start = st.time_input("签到开始", value=datetime.strptime(period_data.get('early_start', '08:10'), '%H:%M').time(), key=f"early_{selected_weekday}_{period}_{idx}")
-                with col6:
-                    late_end = st.time_input("迟到截止", value=datetime.strptime(period_data.get('late_end', '08:30'), '%H:%M').time(), key=f"late_{selected_weekday}_{period}_{idx}")
-                
-                if enabled:
-                    if not schedule_data.get(selected_weekday):
-                        schedule_data[selected_weekday] = {}
-                    schedule_data[selected_weekday][period] = {
-                        'enabled': enabled,
-                        'start_time': start_time.strftime('%H:%M'),
-                        'end_time': end_time.strftime('%H:%M'),
-                        'early_start': early_start.strftime('%H:%M'),
-                        'late_end': late_end.strftime('%H:%M')
-                    }
-            
-            if st.button("保存课表", use_container_width=True, type="primary"):
-                # 使用正确的函数名
-                save_teacher_schedule(st.session_state.teacher_id, st.session_state.selected_class, schedule_data)
-                st.success("课表已保存！")
+            st.markdown(f"### 课表设置 - {st.session_state.selected_class}")
 
+            selected_weekday = st.selectbox("选择星期", WEEKDAYS)
+
+            schedule = load_teacher_schedule(st.session_state.teacher_id, st.session_state.selected_class)
+            weekday_schedule = schedule.get(selected_weekday, {})
+
+            st.write("---")
+
+            col1, col2, col3, col4, col5, col6 = st.columns([0.5, 1, 1, 1, 1, 1])
+            with col1:
+                st.write("启用")
+            with col2:
+                st.write("节次")
+            with col3:
+                st.write("上课时间")
+            with col4:
+                st.write("下课时间")
+            with col5:
+                st.write("签到开始")
+            with col6:
+                st.write("迟到截止")
+
+            for period in PERIODS:
+                # 设置默认时间（区分白天和晚上的课）
+                if period == '第11节':
+                    default_start = '19:00'
+                    default_end = '19:40'
+                    default_early = '18:50'
+                    default_late = '19:10'
+                elif period == '第12节':
+                    default_start = '19:50'
+                    default_end = '20:30'
+                    default_early = '19:40'
+                    default_late = '20:00'
+                elif period == '第13节':
+                    default_start = '20:40'
+                    default_end = '21:20'
+                    default_early = '20:30'
+                    default_late = '20:50'
+                else:
+                    default_start = '08:20'
+                    default_end = '09:00'
+                    default_early = '08:10'
+                    default_late = '08:30'
+                
+                period_data = weekday_schedule.get(period, DEFAULT_PERIOD_TIMES.get(period, {
+                    'start_time': default_start,
+                    'end_time': default_end,
+                    'early_start': default_early,
+                    'late_end': default_late
+                }))
+
+                col1, col2, col3, col4, col5, col6 = st.columns([0.5, 1, 1, 1, 1, 1])
+                with col1:
+                    enabled = st.checkbox("", value=period_data.get('enabled', False),
+                                          key=f"en_{st.session_state.selected_class}_{selected_weekday}_{period}")
+                with col2:
+                    st.write(period)
+                with col3:
+                    start_time = st.time_input("上课",
+                                               value=datetime.strptime(period_data['start_time'], '%H:%M').time(),
+                                               key=f"start_{st.session_state.selected_class}_{selected_weekday}_{period}",
+                                               label_visibility="collapsed")
+                with col4:
+                    end_time = st.time_input("下课",
+                                             value=datetime.strptime(period_data['end_time'], '%H:%M').time(),
+                                             key=f"end_{st.session_state.selected_class}_{selected_weekday}_{period}",
+                                             label_visibility="collapsed")
+                with col5:
+                    early_start = st.time_input("签到开始",
+                                                value=datetime.strptime(period_data['early_start'], '%H:%M').time(),
+                                                key=f"early_{st.session_state.selected_class}_{selected_weekday}_{period}",
+                                                label_visibility="collapsed")
+                with col6:
+                    late_end = st.time_input("迟到截止",
+                                             value=datetime.strptime(period_data['late_end'], '%H:%M').time(),
+                                             key=f"late_{st.session_state.selected_class}_{selected_weekday}_{period}",
+                                             label_visibility="collapsed")
+
+                if selected_weekday not in schedule:
+                    schedule[selected_weekday] = {}
+                schedule[selected_weekday][period] = {
+                    'enabled': enabled,
+                    'start_time': start_time.strftime('%H:%M'),
+                    'end_time': end_time.strftime('%H:%M'),
+                    'early_start': early_start.strftime('%H:%M'),
+                    'late_end' : late_end.strftime('%H:%M')
+                }
+
+            st.write("---")
+
+            if st.button("保存课表", use_container_width=True, type="primary"):
+                save_teacher_schedule(st.session_state.teacher_id, st.session_state.selected_class, schedule)
+                st.success(f"{st.session_state.selected_class} {selected_weekday} 课表保存成功")
         # ========== 班级管理页面 ==========
         elif st.session_state.page == 'class':
             st.markdown("### 班级管理")
-            
-            new_class_name = st.text_input("新班级名称", key="new_class_name_input")
-            if st.button("添加班级", use_container_width=True, key="add_class_button"):
-                if new_class_name:
-                    add_teacher_class(st.session_state.teacher_id, new_class_name)
-                    st.success(f"班级 {new_class_name} 添加成功！")
-                    st.rerun()
-                else:
-                    st.error("请输入班级名称")
-            
-            st.divider()
-            
-            st.markdown("#### 班级列表")
-            class_list = get_teacher_class_list(st.session_state.teacher_id)
-            
-            for idx, cls in enumerate(class_list):
-                col1, col2, col3 = st.columns([2, 3, 1])
-                with col1:
-                    st.write(f"**{cls['name']}**")
-                with col2:
-                    st.write(f"学生数: {len(get_students_by_class(st.session_state.teacher_id, cls['name']))}")
-                with col3:
-                    if st.button(f"删除", key=f"del_class_{cls['name']}_{idx}", use_container_width=True):
-                        remove_teacher_class(st.session_state.teacher_id, cls['name'])
-                        st.success(f"班级 {cls['name']} 删除成功！")
+
+            tab1, tab2 = st.tabs(["添加班级", "现有班级"])
+
+            with tab1:
+                st.markdown("#### 添加新班级")
+
+                next_num = get_next_class_number(st.session_state.teacher_id)
+                default_name = f'{next_num}班'
+                default_prefix = str(next_num)
+
+                class_name = st.text_input("班级名称", value=default_name)
+                prefix = st.text_input("班级前缀（学号首位）", value=default_prefix)
+                student_count = st.number_input("学生人数", min_value=1, max_value=99, value=33, step=1)
+
+                if st.button("添加班级", use_container_width=True, type="primary"):
+                    if not class_name or not prefix:
+                        st.error("请填写完整信息")
+                    else:
+                        ok, msg = add_teacher_class(st.session_state.teacher_id, class_name, prefix, student_count)
+                        if ok:
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+            with tab2:
+                st.markdown("#### 现有班级")
+                classes = get_teacher_class_list(st.session_state.teacher_id)
+
+                for cls in classes:
+                    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+                    with col1:
+                        st.write(f"**{cls['name']}**")
+                    with col2:
+                        st.write(f"前缀: {cls['prefix']}")
+                    with col3:
+                        st.write(f"人数: {cls['student_count']}")
+                    with col4:
+                        if cls['name'] not in ['一班', '二班', '三班']:
+                            if st.button("删除", key=f"del_{cls['name']}", use_container_width=True):
+                                ok, msg = remove_teacher_class(st.session_state.teacher_id, cls['name'])
+                                if ok:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                    st.divider()
+
+                st.markdown("#### 修改班级人数")
+                class_to_edit = st.selectbox("选择班级", [c['name'] for c in classes])
+                new_count = st.number_input("新人数", min_value=1, max_value=99, value=33, step=1)
+                if st.button("修改人数", use_container_width=True):
+                    ok, msg = update_class_student_count(st.session_state.teacher_id, class_to_edit, new_count)
+                    if ok:
+                        st.success(msg)
                         st.rerun()
-            
-            st.divider()
-            
-            st.markdown("#### 添加学生")
-            class_list_for_student = get_teacher_class_list(st.session_state.teacher_id)
-            class_names_for_student = [c['name'] for c in class_list_for_student]
-            
-            # 使用唯一的key
-            selected_class_for_student = st.selectbox("选择班级", class_names_for_student, key="add_student_class_select")
-            new_student_id = st.text_input("学生学号", key="new_student_id_input")
-            
-            if st.button("添加学生", use_container_width=True, key="add_student_button"):
-                if new_student_id and selected_class_for_student:
-                    add_student_to_class(st.session_state.teacher_id, selected_class_for_student, new_student_id)
-                    st.success(f"学生 {new_student_id} 添加到 {selected_class_for_student} 成功！")
-                    st.rerun()
-                else:
-                    st.error("请输入学号并选择班级")
+                    else:
+                        st.error(msg)
