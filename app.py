@@ -1,4 +1,42 @@
-import streamlit as st
+            status = check_attendance_status(schedule, now)
+
+            # 检查是否已经签到
+            date_str = now.strftime('%Y-%m-%d')
+            attendance_df, _ = load_attendance(st.session_state.teacher_id, student_class, date_str, period)
+            has_checkin = False
+            checkin_status = ''
+            checkin_time = ''
+            if str(st.session_state.user_id) in attendance_df.index:
+                checkin_time = attendance_df.loc[str(st.session_state.user_id), '签到时间']
+                checkin_status = attendance_df.loc[str(st.session_state.user_id), '状态']
+                has_checkin = checkin_time != ''
+
+            # 如果已经签到，显示签到状态
+            if has_checkin:
+                st.success(f"✅ 已签到 ({checkin_status})")
+                st.write(f"签到时间：{checkin_time}")
+            elif status == 'early':
+                st.error(f"签到时间未到，请在 {schedule['early_start']} 后签到")
+            elif status == 'absent':
+                st.error("签到时间已过，已记为缺勤，请联系老师补录")
+            elif status == 'present':
+                if st.button("签到", use_container_width=True, type="primary"):
+                    ok, msg = record_attendance(st.session_state.teacher_id, student_class, st.session_state.user_id,
+                                                period, '出勤', now.strftime('%H:%M:%S'))
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+            elif status == 'late':
+                if st.button("签到", use_container_width=True, type="primary"):
+                    ok, msg = record_attendance(st.session_state.teacher_id, student_class, st.session_state.user_id,
+                                                period, '迟到', now.strftime('%H:%M:%S'))
+                    if ok:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)import streamlit as st
 from datetime import datetime, timezone, timedelta
 from data_manager import *
 
@@ -355,7 +393,7 @@ elif st.session_state.user_type == 'teacher':
                     'enabled': enabled,
                     'start_time': start_time.strftime('%H:%M'),
                     'early_start': early_start.strftime('%H:%M'),
-                    'late_end': late_end.strftime('%H:%M'),
+                    'late_end' : late_end.strftime('%H:%M'),
                     'end_time': period_data.get('end_time', '09:00')
                 }
 
